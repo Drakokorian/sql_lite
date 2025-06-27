@@ -3,6 +3,14 @@ package pkg
 import (
 	"encoding/binary"
 	"fmt"
+	"io"
+)
+
+// Custom error types for header validation failures.
+var (
+	ErrInvalidFileFormat        = fmt.Errorf("invalid SQLite file format")
+	ErrInvalidPageSize          = fmt.Errorf("invalid page size in header")
+	ErrUnsupportedFileFormatVersion = fmt.Errorf("unsupported file format version")
 )
 
 // DatabaseHeader represents the 100-byte header at the beginning of an SQLite database file.
@@ -41,10 +49,14 @@ func ReadDatabaseHeader(page Page) (*DatabaseHeader, uint32, error) {
 
 	h := &DatabaseHeader{}
 
+	// Magic String (bytes 0-15): "SQLite format 3\000"
 	copy(h.MagicString[:], page[0:16])
-	h.PageSize = binary.BigEndian.Uint16(page[16:18]) // This reads the encoded value
+	if string(h.MagicString[:15]) != "SQLite format 3" || h.MagicString[15] != 0 {
+		return nil, 0, ErrInvalidFileFormat
+	}
 
-	// SQLite stores 65536 as 1. Adjust for this.
+	// Page Size (bytes 16-17)
+	h.PageSize = binary.BigEndian.Uint16(page[16:18])
 	var actualPageSize uint32
 	if h.PageSize == 1 {
 		actualPageSize = 65536
@@ -52,8 +64,20 @@ func ReadDatabaseHeader(page Page) (*DatabaseHeader, uint32, error) {
 		actualPageSize = uint32(h.PageSize)
 	}
 
+	// Validate page size: must be a power of 2 between 512 and 65536.
+	if actualPageSize < 512 || actualPageSize > 65536 || (actualPageSize&(actualPageSize-1)) != 0 {
+		return nil, 0, ErrInvalidPageSize
+	}
+
+	// File Format Write/Read Version (bytes 18-19)
 	h.FileFormatWriteVersion = page[18]
 	h.FileFormatReadVersion = page[19]
+	// Validate versions: must be 1 or 2 for now.
+	if h.FileFormatWriteVersion > 2 || h.FileFormatReadVersion > 2 || h.FileFormatWriteVersion == 0 || h.FileFormatReadVersion == 0 {
+		return nil, 0, ErrUnsupportedFileFormatVersion
+	}
+
+	// Remaining fields
 	h.Reserved1 = page[20]
 	h.MaxEmbeddedPayloadFrac = page[21]
 	h.MinEmbeddedPayloadFrac = page[22]
@@ -72,20 +96,6 @@ func ReadDatabaseHeader(page Page) (*DatabaseHeader, uint32, error) {
 	h.VersionValidFor = binary.BigEndian.Uint32(page[68:72])
 	h.SQLiteVersion = binary.BigEndian.Uint32(page[72:76])
 	copy(h.Reserved2[:], page[76:96])
-
-	// Basic validation of page size
-	// Page size must be a power of 2 between 512 and 65536.
-	isValidPageSize := false
-	for _, size := range []uint32{512, 1024, 2048, 4096, 8192, 16384, 32768, 65536} {
-		if actualPageSize == size {
-			isValidPageSize = true
-			break
-		}
-	}
-
-	if !isValidPageSize {
-		return nil, 0, fmt.Errorf("invalid page size in header: %d", actualPageSize)
-	}
 
 	return h, actualPageSize, nil
 }

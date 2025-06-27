@@ -71,6 +71,8 @@ func (p *Pager) GetPage(id pkg.PageID) (pkg.Page, error) {
 	p.cacheMisses.Inc()
 	// If not in cache, read from disk
 	offset := int64(id-1) * int64(p.pageSize)
+	// Zero-Allocation Read: For extreme performance, a pre-allocated buffer pool
+	// could be used here to minimize allocations during reads in hot paths.
 	page := make(pkg.Page, p.pageSize)
 	n, err := p.file.ReadAt(page, offset)
 	if err != nil && err != io.EOF {

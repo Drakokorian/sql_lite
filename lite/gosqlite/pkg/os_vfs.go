@@ -70,13 +70,11 @@ func (f *OSFile) Size() (int64, error) {
 // Lock implements file locking. This is a placeholder and does not provide actual locking.
 // TODO: Implement platform-specific file locking (e.g., fcntl on Unix, LockFileEx on Windows).
 func (f *OSFile) Lock(lockType int) error {
-	return nil
+	return f.lock(lockType)
 }
 
-// Unlock implements file unlocking. This is a placeholder and does not provide actual unlocking.
-// TODO: Implement platform-specific file unlocking.
 func (f *OSFile) Unlock() error {
-	return nil
+	return f.unlock()
 }
 
 func init() {
