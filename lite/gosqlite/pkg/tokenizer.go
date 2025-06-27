@@ -60,6 +60,7 @@ const (
 	BY
 	ASC
 	DESC
+	JOIN
 )
 
 // String returns the string representation of the TokenType.
@@ -108,6 +109,7 @@ func (t TokenType) String() string {
 	case BY: return "BY"
 	case ASC: return "ASC"
 	case DESC: return "DESC"
+	case JOIN: return "JOIN"
 	default: return "UNKNOWN"
 	}
 }
@@ -146,6 +148,7 @@ var keywords = map[string]TokenType{
 	"by":      BY,
 	"asc":     ASC,
 	"desc":    DESC,
+	"join":    JOIN,
 }
 
 // LookupIdent checks if the given identifier is a keyword.
@@ -189,6 +192,13 @@ func (t *Tokenizer) readChar() {
 	// Enforce max query length
 	if t.position >= t.maxQueryLen {
 		t.errors = append(t.errors, fmt.Sprintf("query exceeds maximum allowed length of %d characters", t.maxQueryLen))
+		t.ch = 0 // Stop further processing
+		return
+	}
+
+	// Character set validation
+	if t.ch != 0 && !isValidChar(t.ch) {
+		t.errors = append(t.errors, fmt.Sprintf("invalid character: %q at line %d, column %d", t.ch, t.line, t.column))
 		t.ch = 0 // Stop further processing
 	}
 }
@@ -322,8 +332,12 @@ func (t *Tokenizer) readString() string {
 	position := t.position + 1 // Skip the opening quote
 	for {
 		t.readChar()
-		if t.ch == '\'' || t.ch == 0 {
+		if t.ch == ''' {
 			break
+		}
+		if t.ch == 0 {
+			t.errors = append(t.errors, fmt.Sprintf("unclosed string literal starting at line %d, column %d", t.line, position))
+			return "" // Return empty string on unclosed literal
 		}
 	}
 	literal := t.input[position:t.position]
@@ -344,4 +358,16 @@ func isLetter(ch byte) bool {
 // isDigit checks if a byte is a digit.
 func isDigit(ch byte) bool {
 	return '0' <= ch && ch <= '9'
+}
+
+// isValidChar checks if a byte is a valid character for SQL queries.
+func isValidChar(ch byte) bool {
+	// Allow letters, digits, common SQL symbols, and whitespace
+	return isLetter(ch) || isDigit(ch) ||
+		ch == ' ' || ch == '	' || ch == '
+' || ch == '' ||
+		ch == '=' || ch == '!' || ch == '<' || ch == '>' ||
+		ch == '+' || ch == '-' || ch == '*' || ch == '/' ||
+		ch == ',' || ch == ';' || ch == '(' || ch == ')' ||
+		ch == ''' || ch == '.' // Added '.' for numbers and identifiers
 }

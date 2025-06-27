@@ -38,7 +38,7 @@ type Statement interface {
 
 // Expression is the interface that all expression nodes implement.
 type Expression interface {
-	Node	
+	Node
 	expressionNode()
 }
 
@@ -62,6 +62,7 @@ type SelectStatement struct {
 	Token      Token // The SELECT token
 	Columns    []Expression
 	From       *Identifier
+	Join       *JoinClause
 	Where      Expression
 	Limit      Expression
 	Offset     Expression
@@ -136,9 +137,9 @@ func (is *InsertStatement) NodeType() NodeType { return InsertStatementNode }
 
 // CreateStatement represents a CREATE TABLE statement.
 type CreateStatement struct {
-	Token   Token // The CREATE token
-	Table   *Identifier
-	Columns []*ColumnDefinition
+	Token       Token // The CREATE token
+	Table       *Identifier
+	Columns     []*ColumnDefinition
 	Constraints []*TableConstraint
 }
 
@@ -169,7 +170,7 @@ type Identifier struct {
 func (i *Identifier) expressionNode()      {}
 func (i *Identifier) TokenLiteral() string { return i.Token.Literal }
 func (i *Identifier) String() string       { return i.Value }
-func (i *Identifier) NodeType() NodeType { return IdentifierNode }
+func (i *Identifier) NodeType() NodeType   { return IdentifierNode }
 
 // IntegerLiteral represents an integer literal.
 type IntegerLiteral struct {
@@ -180,7 +181,7 @@ type IntegerLiteral struct {
 func (il *IntegerLiteral) expressionNode()      {}
 func (il *IntegerLiteral) TokenLiteral() string { return il.Token.Literal }
 func (il *IntegerLiteral) String() string       { return il.Token.Literal }
-func (il *IntegerLiteral) NodeType() NodeType { return IntegerLiteralNode }
+func (il *IntegerLiteral) NodeType() NodeType   { return IntegerLiteralNode }
 
 // StringLiteral represents a string literal.
 type StringLiteral struct {
@@ -191,7 +192,7 @@ type StringLiteral struct {
 func (sl *StringLiteral) expressionNode()      {}
 func (sl *StringLiteral) TokenLiteral() string { return sl.Token.Literal }
 func (sl *StringLiteral) String() string       { return "'" + sl.Token.Literal + "'" }
-func (sl *StringLiteral) NodeType() NodeType { return StringLiteralNode }
+func (sl *StringLiteral) NodeType() NodeType   { return StringLiteralNode }
 
 // BinaryExpression represents a binary operation (e.g., 1 + 2, a > b).
 type BinaryExpression struct {
@@ -224,10 +225,26 @@ func (ob *OrderByClause) String() string {
 	return fmt.Sprintf("%s %s", ob.Column.String(), ob.Direction.Literal)
 }
 
+// JoinClause represents a JOIN clause.
+type JoinClause struct {
+	Token Token // The JOIN token
+	Table *Identifier
+	On    Expression
+}
+
+func (jc *JoinClause) String() string {
+	var out strings.Builder
+	out.WriteString(" JOIN " + jc.Table.String())
+	if jc.On != nil {
+		out.WriteString(" ON " + jc.On.String())
+	}
+	return out.String()
+}
+
 // ColumnDefinition represents a column definition in a CREATE TABLE statement.
 type ColumnDefinition struct {
-	Name    *Identifier
-	DataType Token // TEXT, INTEGER
+	Name        *Identifier
+	DataType    Token // TEXT, INTEGER
 	Constraints []*ColumnConstraint
 }
 
@@ -261,7 +278,7 @@ func (cc *ColumnConstraint) String() string {
 
 // TableConstraint represents a table constraint (e.g., PRIMARY KEY (col1, col2)).
 type TableConstraint struct {
-	Type Token // PRIMARY
+	Type    Token // PRIMARY
 	Columns []*Identifier
 }
 
@@ -281,15 +298,18 @@ func (tc *TableConstraint) String() string {
 
 // Parser parses a stream of tokens into an AST.
 type Parser struct {
-	l *Tokenizer
-	currentToken Token
-	peekToken    Token
-	errors       []string
+	l                  *Tokenizer
+	currentToken       Token
+	peekToken          Token
+	errors             []string
+	maxExpressionDepth int
+	maxTables          int
+	// TODO: Implement mechanisms to monitor and limit memory consumption during AST construction and semantic analysis.
 }
 
 // NewParser creates a new Parser instance.
-func NewParser(l *Tokenizer) *Parser {
-	p := &Parser{l: l, errors: []string{}}
+func NewParser(l *Tokenizer, maxExpressionDepth, maxTables int) *Parser {
+	p := &Parser{l: l, errors: []string{}, maxExpressionDepth: maxExpressionDepth, maxTables: maxTables}
 	// Read two tokens, so currentToken and peekToken are both set.
 	p.nextToken()
 	p.nextToken()
@@ -304,7 +324,7 @@ func (p *Parser) Errors() []string {
 // peekError adds an error if the peek token is not of the expected type.
 func (p *Parser) peekError(t TokenType) {
 	msg := fmt.Sprintf("expected next token to be %s, got %s instead",
-			t.String(), p.peekToken.Type.String())
+		t.String(), p.peekToken.Type.String())
 	p.errors = append(p.errors, msg)
 }
 
@@ -325,6 +345,8 @@ func (p *Parser) ParseProgram() *Program {
 	for p.currentToken.Type != EOF {
 		smt := p.parseStatement()
 		if smt != nil {
+			// TODO: Implement semantic analysis here (e.g., type checking, function argument validation)
+			// This is where checks like "correct number of arguments for functions, type compatibility" would go.
 			program.Statements = append(program.Statements, smt)
 		}
 		// Advance token even if statement parsing failed to avoid infinite loop
@@ -363,11 +385,21 @@ func (p *Parser) parseSelectStatement() *SelectStatement {
 		smt.From = &Identifier{Token: p.currentToken, Value: p.currentToken.Literal}
 	}
 
+	if p.maxTables > 0 && smt.From != nil {
+		if len(strings.Split(smt.From.Value, ",")) > p.maxTables {
+			p.errors = append(p.errors, "table limit exceeded")
+			return nil
+		}
+	}
+
 	// Check for WHERE clause
 	if p.peekTokenIs(WHERE) {
 		p.nextToken() // Consume WHERE
 		p.nextToken() // Consume expression start
 		smt.Where = p.parseExpression(0) // Parse expression with lowest precedence
+		if smt.Where == nil {
+			return nil
+		}
 	}
 
 	// Check for ORDER BY clause
@@ -385,6 +417,9 @@ func (p *Parser) parseSelectStatement() *SelectStatement {
 		p.nextToken() // Consume LIMIT
 		p.nextToken() // Consume limit value
 		smt.Limit = &IntegerLiteral{Token: p.currentToken, Value: p.parseIntegerLiteral().Value}
+		if smt.Limit == nil {
+			return nil
+		}
 	}
 
 	// Check for OFFSET clause
@@ -392,6 +427,9 @@ func (p *Parser) parseSelectStatement() *SelectStatement {
 		p.nextToken() // Consume OFFSET
 		p.nextToken() // Consume offset value
 		smt.Offset = &IntegerLiteral{Token: p.currentToken, Value: p.parseIntegerLiteral().Value}
+		if smt.Offset == nil {
+			return nil
+		}
 	}
 
 	// Consume semicolon if present
@@ -593,11 +631,22 @@ func (p *Parser) parseIdentifierList(stop TokenType) []*Identifier {
 
 // parseExpression parses an expression with operator precedence.
 func (p *Parser) parseExpression(precedence int) Expression {
+	if p.maxExpressionDepth > 0 && precedence >= p.maxExpressionDepth {
+		p.errors = append(p.errors, "expression depth limit exceeded")
+		return nil
+	}
+
 	leftExp := p.parsePrefixExpression()
+	if leftExp == nil {
+		return nil
+	}
 
 	for !p.peekTokenIs(SEMICOLON) && precedence < p.peekPrecedence() {
 		p.nextToken()
 		leftExp = p.parseInfixExpression(leftExp)
+		if leftExp == nil {
+			return nil
+		}
 	}
 
 	return leftExp
@@ -659,16 +708,16 @@ const (
 
 // precedences maps token types to their precedence levels.
 var precedences = map[TokenType]int{
-	EQ:     EQUALS,
-	NEQ:    EQUALS,
-	LT:     LESSGREATER,
-	GT:     LESSGREATER,
-	LTE:    LESSGREATER,
-	GTE:    LESSGREATER,
-	PLUS:   SUM,
-	MINUS:  SUM,
+	EQ:       EQUALS,
+	NEQ:      EQUALS,
+	LT:       LESSGREATER,
+	GT:       LESSGREATER,
+	LTE:      LESSGREATER,
+	GTE:      LESSGREATER,
+	PLUS:     SUM,
+	MINUS:    SUM,
 	ASTERISK: PRODUCT,
-	SLASH:  PRODUCT,
+	SLASH:    PRODUCT,
 }
 
 // peekPrecedence returns the precedence of the peek token.
@@ -693,7 +742,7 @@ func (p *Parser) expectPeek(t TokenType) bool {
 		p.nextToken()
 		return true
 	}
-	
+
 	p.peekError(t)
 	return false
 }

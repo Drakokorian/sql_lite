@@ -49,8 +49,8 @@ func (c *ARCCache) Get(id PageID) (Page, bool) {
 		// Hit in T1, move to T2
 		c.t1_lru.Remove(elem)
 		delete(c.t1_map, id)
-		c.t2_lru.PushFront(elem)
-		c.t2_map[id] = elem
+		c.t2_lru.PushFront(elem.Value)
+		c.t2_map[id] = c.t2_lru.Front()
 		return elem.Value.(Page), true
 	} else if elem, ok := c.t2_map[id]; ok {
 		// Hit in T2, move to front of T2
@@ -59,21 +59,25 @@ func (c *ARCCache) Get(id PageID) (Page, bool) {
 	} else if elem, ok := c.b1_map[id]; ok {
 		// Hit in B1, move to T2 and adapt p
 		c.p = min(c.capacity, c.p+max(1, len(c.b2_lru)/len(c.b1_lru)))
-		c.replace()
+		c.replace(false)
+		// Move from B1 to T2
+		page := elem.Value.(Page)
 		c.b1_lru.Remove(elem)
 		delete(c.b1_map, id)
-		c.t2_lru.PushFront(elem)
-		c.t2_map[id] = elem
-		return elem.Value.(Page), true
+		c.t2_lru.PushFront(page)
+		c.t2_map[id] = c.t2_lru.Front()
+		return page, true
 	} else if elem, ok := c.b2_map[id]; ok {
 		// Hit in B2, move to T2 and adapt p
 		c.p = max(0, c.p-max(1, len(c.b1_lru)/len(c.b2_lru)))
-		c.replace()
+		c.replace(true)
+		// Move from B2 to T2
+		page := elem.Value.(Page)
 		c.b2_lru.Remove(elem)
 		delete(c.b2_map, id)
-		c.t2_lru.PushFront(elem)
-		c.t2_map[id] = elem
-		return elem.Value.(Page), true
+		c.t2_lru.PushFront(page)
+		c.t2_map[id] = c.t2_lru.Front()
+		return page, true
 	}
 
 	return nil, false

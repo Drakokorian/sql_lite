@@ -31,89 +31,21 @@ func NewSandboxedVFS(base VFS, allowed ...string) *SandboxedVFS {
 	return s
 }
 
-func (s *SandboxedVFS) canonicalizeAndValidatePath(path string) (string, error) {
-	// 1. Get absolute path *before* cleaning or resolving symlinks
+func (s *SandboxedVFS) isPathAllowed(path string) (string, error) {
 	absPath, err := filepath.Abs(path)
 	if err != nil {
 		return "", fmt.Errorf("failed to get absolute path for %s: %w", path, err)
 	}
 
-	// 2. Clean the path to resolve ".." components.
 	cleanPath := filepath.Clean(absPath)
 
-	// 3. After cleaning, check if the path is still within the allowed directories.
-	// This is the most critical check.
-	isAllowed := false
 	for allowed := range s.allowedPaths {
 		if strings.HasPrefix(cleanPath, allowed) {
-			isAllowed = true
-			break
+			return cleanPath, nil
 		}
 	}
 
-	if !isAllowed {
-		return "", fmt.Errorf("path %s is outside the allowed directories", path)
-	}
-
-	// 4. Resolve symbolic links. After this, we must re-validate the path.
-	resolvedPath, err := filepath.EvalSymlinks(cleanPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			// The path or a component doesn't exist. This is acceptable for new files.
-			resolvedPath = cleanPath
-		} else {
-			return "", fmt.Errorf("failed to resolve symlinks for %s: %w", cleanPath, err)
-		}
-	}
-
-	// 5. Final validation after resolving symlinks.
-	finalPath, err := filepath.Abs(resolvedPath)
-	if err != nil {
-		return "", fmt.Errorf("failed to get absolute path for resolved path %s: %w", resolvedPath, err)
-	}
-
-	isAllowed = false
-	for allowed := range s.allowedPaths {
-		if strings.HasPrefix(finalPath, allowed) {
-			isAllowed = true
-			break
-		}
-	}
-
-	if !isAllowed {
-		return "", fmt.Errorf("resolved path %s is outside the allowed directories", finalPath)
-	}
-
-	// 6. Disallow Windows \\?\ prefixes for security and consistency
-	if runtime.GOOS == "windows" && strings.HasPrefix(finalPath, `\\?\`) {
-		return "", fmt.Errorf("path %s uses disallowed Windows \\\\?\\ prefix", path)
-	}
-
-	return finalPath, nil
-}
-
-func (s *SandboxedVFS) isPathAllowed(path string) (bool, error) {
-	absPath, err := s.canonicalizeAndValidatePath(path)
-	if err != nil {
-		return false, err
-	}
-
-	// Check if the exact path is allowed
-	if _, ok := s.allowedPaths[absPath]; ok {
-		return true, nil
-	}
-
-	// Check if the path is within an allowed directory
-	for allowedPath := range s.allowedPaths {
-		if strings.HasPrefix(absPath, allowedPath) {
-			// Ensure it's a directory prefix, not just a string prefix
-			if len(absPath) == len(allowedPath) || absPath[len(allowedPath)] == filepath.Separator {
-				return true, nil
-			}
-		}
-	}
-
-	return false, nil
+	return "", fmt.Errorf("path %s is not in allowed directories", path)
 }
 
 func (s *SandboxedVFS) Open(path string, flags int, perm os.FileMode) (File, error) {
