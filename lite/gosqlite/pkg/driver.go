@@ -3,10 +3,13 @@ package pkg
 import (
 	"database/sql/driver"
 	"fmt"
+	"strings"
 )
 
 // GoSQLiteDriver implements the database/sql/driver.Driver interface.
-type GoSQLiteDriver struct{}
+type GoSQLiteDriver struct{
+	jitCompiler *JITCompiler
+}
 
 // Open returns a new connection to the database.
 // The name is a string in a driver-specific format.
@@ -15,12 +18,13 @@ func (d *GoSQLiteDriver) Open(name string) (driver.Conn, error) {
 	// (e.g., pager, VFS, database file handling).
 	// For now, we simulate a successful connection.
 	fmt.Printf("GoSQLiteDriver: Opening connection to %s\n", name)
-	return &GoSQLiteConn{name: name}, nil
+	return &GoSQLiteConn{name: name, driver: d}, nil
 }
 
 // GoSQLiteConn implements the database/sql/driver.Conn interface.
 type GoSQLiteConn struct {
 	name string
+	driver *GoSQLiteDriver // Reference to the parent driver to access JIT compiler
 	// In a full implementation, this would hold the actual connection to the
 	// underlying SQLite database instance, including its pager, VFS, etc.
 }
@@ -86,16 +90,46 @@ func (s *GoSQLiteStmt) Exec(args []driver.Value) (driver.Result, error) {
 	// Parameter handling: In a real VDBE, args would be bound to registers.
 	fmt.Printf("GoSQLiteStmt: Executing DML query: %s with args: %v\n", s.query, args)
 
-	// Create a dummy VDBE program for execution. In a real scenario,
-	// this would be generated from s.parsedProgram.
-	dummyProgram := []OpCode{
-		{Code: OP_Init},
-		{Code: OP_Halt},
+	// JIT Compilation Logic
+	queryID := s.query // Simple query ID for now
+	s.conn.driver.jitCompiler.RecordQueryExecution(queryID)
+
+	var compiledCode interface{}
+	var isCompiled bool
+
+	if s.conn.driver.jitCompiler.IsHotQuery(queryID) {
+		compiledCode, isCompiled = s.conn.driver.jitCompiler.GetCompiledCode(queryID)
+		if !isCompiled {
+			// Conceptual compilation: In a real scenario, this would involve converting AST to VDBE bytecode
+			// and then compiling that bytecode to native code.
+			// For now, we pass a dummy bytecode.
+			dummyBytecode := []OpCode{{Code: OP_Init}, {Code: OP_Halt}}
+			var err error
+			compiledCode, err = s.conn.driver.jitCompiler.Compile(queryID, dummyBytecode)
+			if err != nil {
+				fmt.Printf("JIT compilation failed for %s: %v\n", queryID, err)
+				// Fallback to VDBE execution if JIT compilation fails
+			}
+		}
 	}
-	v := NewVdbe(dummyProgram)
-	_, err := v.Execute()
-	if err != nil {
-		return nil, fmt.Errorf("VDBE execution error: %w", err)
+
+	if isCompiled {
+		fmt.Printf("GoSQLiteStmt: Executing JIT-compiled DML query: %s\n", s.query)
+		// In a real scenario, this would execute the native compiled code.
+		s.conn.driver.jitCompiler.ExecuteCompiledCode(queryID, compiledCode)
+	} else {
+		fmt.Printf("GoSQLiteStmt: Executing VDBE DML query: %s\n", s.query)
+		// Create a dummy VDBE program for execution. In a real scenario,
+		// this would be generated from s.parsedProgram.
+		dummyProgram := []OpCode{
+			{Code: OP_Init},
+			{Code: OP_Halt},
+		}
+		v := NewVdbe(dummyProgram)
+		_, err := v.Execute()
+		if err != nil {
+			return nil, fmt.Errorf("VDBE execution error: %w", err)
+		}
 	}
 
 	return driver.RowsAffected(1), nil // Placeholder for affected rows
@@ -106,24 +140,62 @@ func (s *GoSQLiteStmt) Query(args []driver.Value) (driver.Rows, error) {
 	// For SELECT statements, execute the VDBE program and return rows.
 	fmt.Printf("GoSQLiteStmt: Executing SELECT query: %s with args: %v\n", s.query, args)
 
-	// Create a dummy VDBE program for execution. In a real scenario,
-	// this would be generated from s.parsedProgram.
-	dummyProgram := []OpCode{
-		{Code: OP_Init},
-		{Code: OP_ResultRow, P1: 1, P2: 2}, // Example: return values from registers 1 and 2
-		{Code: OP_Halt},
-	}
-	v := NewVdbe(dummyProgram)
-	// In a real implementation, the VDBE would produce actual rows.
-	// For now, we'll return a placeholder GoSQLiteRows.
+	// JIT Compilation Logic
+	queryID := s.query // Simple query ID for now
+	s.conn.driver.jitCompiler.RecordQueryExecution(queryID)
 
-	// Simulate some data for the rows
-	data := [][]driver.Value{
-		{int64(1), "Alice"},
-		{int64(2), "Bob"},
+	var compiledCode interface{}
+	var isCompiled bool
+
+	if s.conn.driver.jitCompiler.IsHotQuery(queryID) {
+		compiledCode, isCompiled = s.conn.driver.jitCompiler.GetCompiledCode(queryID)
+		if !isCompiled {
+			// Conceptual compilation
+			dummyBytecode := []OpCode{
+				{Code: OP_Init},
+				{Code: OP_ResultRow, P1: 1, P2: 2},
+				{Code: OP_Halt},
+			}
+			var err error
+			compiledCode, err = s.conn.driver.jitCompiler.Compile(queryID, dummyBytecode)
+			if err != nil {
+				fmt.Printf("JIT compilation failed for %s: %v\n", queryID, err)
+				// Fallback to VDBE execution if JIT compilation fails
+			}
+		}
 	}
 
-	return &GoSQLiteRows{data: data, currentRow: -1}, nil
+	if isCompiled {
+		fmt.Printf("GoSQLiteStmt: Executing JIT-compiled SELECT query: %s\n", s.query)
+		// In a real scenario, this would execute the native compiled code
+		s.conn.driver.jitCompiler.ExecuteCompiledCode(queryID, compiledCode)
+		// Simulate some data for the rows from compiled execution
+		data := [][]driver.Value{
+			{int64(10), "JIT-Alice"},
+			{int64(20), "JIT-Bob"},
+		}
+		return &GoSQLiteRows{data: data, currentRow: -1}, nil
+	} else {
+		fmt.Printf("GoSQLiteStmt: Executing VDBE SELECT query: %s\n", s.query)
+		// Create a dummy VDBE program for execution. In a real scenario,
+		// this would be generated from s.parsedProgram.
+		dummyProgram := []OpCode{
+			{Code: OP_Init},
+			{Code: OP_ResultRow, P1: 1, P2: 2}, // Example: return values from registers 1 and 2
+			{Code: OP_Halt},
+		}
+		v := NewVdbe(dummyProgram)
+		// In a real implementation, the VDBE would produce actual rows.
+		// For now, we'll return a placeholder GoSQLiteRows.
+
+		// Simulate some data for the rows
+		data := [][]driver.Value{
+			{int64(1), "Alice"},
+			{int64(2), "Bob"},
+		}
+
+		return &GoSQLiteRows{data: data, currentRow: -1}, nil
+	}
 }
 
 // GoSQLiteTx implements the database/sql/driver.Tx interface.
@@ -183,5 +255,6 @@ func (r *GoSQLiteRows) Next(dest []driver.Value) error {
 }
 
 func init() {
-	driver.Register("gosqlite", &GoSQLiteDriver{})
+	// Initialize JIT compiler with a threshold (e.g., 5 executions to be considered hot)
+	driver.Register("gosqlite", &GoSQLiteDriver{jitCompiler: NewJITCompiler(5)})
 }

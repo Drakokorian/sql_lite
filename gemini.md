@@ -6,6 +6,7 @@ To build a pure Go SQLite driver engineered for mission-critical, high-performan
 ---
 
 ## **Governing Pillars**
+0. Must be built like an entrpirse porduct no excuses 
 
 1.  **Hyper-Scale Architecture Support:**
     *   The driver is designed as a component for sharded, distributed systems.
