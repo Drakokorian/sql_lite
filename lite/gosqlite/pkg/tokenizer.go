@@ -15,6 +15,7 @@ const (
 	// Identifiers + literals
 	IDENT  // field_name, table_name
 	INT    // 12345
+	FLOAT  // 123.45
 	STRING // "hello world"
 
 	// Operators
@@ -70,6 +71,7 @@ func (t TokenType) String() string {
 	case EOF: return "EOF"
 	case IDENT: return "IDENT"
 	case INT: return "INT"
+	case FLOAT: return "FLOAT"
 	case STRING: return "STRING"
 	case EQ: return "EQ"
 	case NEQ: return "NEQ"
@@ -243,6 +245,7 @@ func (t *Tokenizer) NextToken() Token {
 		} else {
 			tok = newToken(ILLEGAL, t.ch)
 			t.errors = append(t.errors, fmt.Sprintf("unexpected character: %q at line %d, column %d", t.ch, tok.Line, tok.Column))
+			t.readChar() // Consume the illegal character to avoid getting stuck
 		}
 	case ';':
 		tok = newToken(SEMICOLON, t.ch)
@@ -297,6 +300,7 @@ func (t *Tokenizer) NextToken() Token {
 		} else {
 			tok = newToken(ILLEGAL, t.ch)
 			t.errors = append(t.errors, fmt.Sprintf("unexpected character: %q at line %d, column %d", t.ch, tok.Line, tok.Column))
+			t.readChar() // Consume the illegal character to avoid getting stuck
 		}
 	}
 
@@ -318,11 +322,19 @@ func (t *Tokenizer) readIdentifier() string {
 	return t.input[position:t.position]
 }
 
-// readNumber reads a number (digits).
+// readNumber reads a number (digits, potentially with a decimal point).
 func (t *Tokenizer) readNumber() string {
 	position := t.position
 	for isDigit(t.ch) {
 		t.readChar()
+	}
+
+	if t.ch == '.' && isDigit(t.peekChar()) {
+		t.readChar() // Consume the '.'
+		for isDigit(t.ch) {
+			t.readChar()
+		}
+		return t.input[position:t.position]
 	}
 	return t.input[position:t.position]
 }

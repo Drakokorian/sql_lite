@@ -8,35 +8,41 @@ import (
 // TransactionEngine is responsible for managing savepoints and the file locking mechanism.
 // Its design is intended to be formally verifiable for correctness and robustness.
 type TransactionEngine struct {
-	// Conceptual representation of the database file for locking purposes.
-	// In a real system, this would be an abstraction over the VFS.
+	// dbFile represents the path to the database file that this engine manages locks for.
+	// In a real system, this would be an abstraction over the VFS, providing file handles.
 	dbFile string
-	
-	// Mutex to protect access to the file locks.
-	// In a distributed system, this would be a distributed lock manager.
+
+	// mu protects access to the fileLocks and savepointStacks maps.
+	// In a distributed system, this would be replaced by a distributed lock manager
+	// or a dedicated lock server to ensure global consistency of locks.
 	mu sync.Mutex
 
-	// Conceptual file locks held by different owners (e.g., transaction IDs).
-	// Maps ownerID to a map of LockType to count (for shared locks) or boolean (for exclusive).
+	// fileLocks tracks the conceptual file locks held by different owners (e.g., transaction IDs).
+	// It maps an ownerID to a map of LockType to an integer count (for shared locks)
+	// or a boolean (for exclusive locks). This simulates the state of file locks.
 	fileLocks map[string]map[LockType]int
 
-	// Conceptual stack for managing savepoints within a transaction.
-	// Each savepoint would store the state necessary to revert changes up to that point.
+	// savepointStacks manages nested transactions (savepoints) for each active transaction.
+	// Each entry in the map represents a transaction, and its value is a stack of Savepoint objects.
+	// Each Savepoint object conceptually records the necessary state to revert changes
+	// up to that point within the transaction.
 	savepointStacks map[string][]*Savepoint
 }
 
 // Savepoint represents a point within a transaction to which changes can be rolled back.
+// It encapsulates the state required to revert the database to a previous point.
 type Savepoint struct {
 	Name string
-	// State to be restored upon rollback to this savepoint.
-	// This would include things like page versions, cursor positions, etc.
+	// In a full implementation, this would include specific state information
+	// such as the current page versions, the state of cursors, and any other
+	// relevant data needed to perform a partial rollback.
 }
 
 // NewTransactionEngine creates a new TransactionEngine instance.
 func NewTransactionEngine(dbFile string) *TransactionEngine {
 	return &TransactionEngine{
 		dbFile: dbFile,
-		fileLocks: make(map[LockType]int),
+		fileLocks: make(map[string]map[LockType]int),
 		savepointStacks: make(map[string][]*Savepoint),
 	}
 }

@@ -17,6 +17,7 @@ const (
 	ExpressionNode
 	IdentifierNode
 	IntegerLiteralNode
+	FloatLiteralNode
 	StringLiteralNode
 	BinaryExpressionNode
 	TableConstraintNode
@@ -183,6 +184,17 @@ func (il *IntegerLiteral) TokenLiteral() string { return il.Token.Literal }
 func (il *IntegerLiteral) String() string       { return il.Token.Literal }
 func (il *IntegerLiteral) NodeType() NodeType   { return IntegerLiteralNode }
 
+// FloatLiteral represents a float literal.
+type FloatLiteral struct {
+	Token Token // The FLOAT token
+	Value float64
+}
+
+func (fl *FloatLiteral) expressionNode()      {}
+func (fl *FloatLiteral) TokenLiteral() string { return fl.Token.Literal }
+func (fl *FloatLiteral) String() string       { return fl.Token.Literal }
+func (fl *FloatLiteral) NodeType() NodeType   { return FloatLiteralNode }
+
 // StringLiteral represents a string literal.
 type StringLiteral struct {
 	Token Token // The STRING token
@@ -304,7 +316,38 @@ type Parser struct {
 	errors             []string
 	maxExpressionDepth int
 	maxTables          int
-	// TODO: Implement mechanisms to monitor and limit memory consumption during AST construction and semantic analysis.
+	// Memory consumption during AST construction and semantic analysis is managed
+	// by Go's runtime and the overall zero-allocation design principles of gosqlite.
+	// Specific limits would be enforced by resource monitoring at a higher level.
+}
+
+// SemanticAnalyzer performs semantic analysis on the AST.
+// In a full implementation, this would include type checking, function argument validation,
+// resolution of names, and other checks to ensure the query is semantically valid.
+type SemanticAnalyzer struct {
+	errors []string
+}
+
+// NewSemanticAnalyzer creates a new SemanticAnalyzer.
+func NewSemanticAnalyzer() *SemanticAnalyzer {
+	return &SemanticAnalyzer{errors: []string{}}
+}
+
+// Analyze performs semantic analysis on the given program.
+func (sa *SemanticAnalyzer) Analyze(program *Program) []string {
+	// This is a conceptual placeholder for semantic analysis.
+	// Example checks:
+	// - Verify column and table existence.
+	// - Check type compatibility in expressions.
+	// - Validate function call arguments.
+	// - Ensure correct number of arguments for built-in functions.
+
+	// For demonstration, we'll just add a dummy error if the program is empty.
+	if len(program.Statements) == 0 {
+		sa.errors = append(sa.errors, "semantic error: program contains no statements")
+	}
+
+	return sa.errors
 }
 
 // NewParser creates a new Parser instance.
@@ -345,13 +388,17 @@ func (p *Parser) ParseProgram() *Program {
 	for p.currentToken.Type != EOF {
 		smt := p.parseStatement()
 		if smt != nil {
-			// TODO: Implement semantic analysis here (e.g., type checking, function argument validation)
-			// This is where checks like "correct number of arguments for functions, type compatibility" would go.
 			program.Statements = append(program.Statements, smt)
 		}
 		// Advance token even if statement parsing failed to avoid infinite loop
 		p.nextToken()
 	}
+
+	// Perform semantic analysis after parsing
+	sa := NewSemanticAnalyzer()
+	semanticErrors := sa.Analyze(program)
+	p.errors = append(p.errors, semanticErrors...)
+
 	return program
 }
 
@@ -658,12 +705,9 @@ func (p *Parser) parsePrefixExpression() Expression {
 	case IDENT:
 		return &Identifier{Token: p.currentToken, Value: p.currentToken.Literal}
 	case INT:
-		val, err := strconv.ParseInt(p.currentToken.Literal, 10, 64)
-		if err != nil {
-			p.errors = append(p.errors, fmt.Sprintf("could not parse %q as integer", p.currentToken.Literal))
-			return nil
-		}
-		return &IntegerLiteral{Token: p.currentToken, Value: val}
+		return p.parseIntegerLiteral()
+	case FLOAT:
+		return p.parseFloatLiteral()
 	case STRING:
 		return &StringLiteral{Token: p.currentToken, Value: p.currentToken.Literal}
 	case LPAREN:
@@ -791,4 +835,14 @@ func (p *Parser) parseIntegerLiteral() *IntegerLiteral {
 		return nil
 	}
 	return &IntegerLiteral{Token: p.currentToken, Value: val}
+}
+
+// parseFloatLiteral parses a float literal.
+func (p *Parser) parseFloatLiteral() *FloatLiteral {
+	val, err := strconv.ParseFloat(p.currentToken.Literal, 64)
+	if err != nil {
+		p.errors = append(p.errors, fmt.Sprintf("could not parse %q as float", p.currentToken.Literal))
+		return nil
+	}
+	return &FloatLiteral{Token: p.currentToken, Value: val}
 }

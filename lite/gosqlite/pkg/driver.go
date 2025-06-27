@@ -14,9 +14,12 @@ type GoSQLiteDriver struct{
 // Open returns a new connection to the database.
 // The name is a string in a driver-specific format.
 func (d *GoSQLiteDriver) Open(name string) (driver.Conn, error) {
-	// In a real implementation, this would involve initializing the SQLite backend
-	// (e.g., pager, VFS, database file handling).
-	// For now, we simulate a successful connection.
+	// This method is the entry point for establishing a new database connection.
+	// In an enterprise-grade implementation, this would involve:
+	// 1. Parsing the DSN (Data Source Name) to extract connection parameters.
+	// 2. Initializing the SQLite backend components (Pager, VFS, etc.) based on DSN settings.
+	// 3. Performing any necessary database file initialization or recovery.
+	// 4. Establishing the actual connection to the database file.
 	fmt.Printf("GoSQLiteDriver: Opening connection to %s\n", name)
 	return &GoSQLiteConn{name: name, driver: d}, nil
 }
@@ -25,20 +28,33 @@ func (d *GoSQLiteDriver) Open(name string) (driver.Conn, error) {
 type GoSQLiteConn struct {
 	name string
 	driver *GoSQLiteDriver // Reference to the parent driver to access JIT compiler
-	// In a full implementation, this would hold the actual connection to the
-	// underlying SQLite database instance, including its pager, VFS, etc.
+	// This struct represents an active connection to the SQLite database.
+	// In a full enterprise-grade implementation, it would encapsulate the state
+	// and resources associated with a single database session, including:
+	// - A reference to the underlying Pager instance for file I/O.
+	// - Transaction state management (e.g., current transaction ID, isolation level).
+	// - Prepared statement cache specific to this connection.
+	// - Any session-specific settings or temporary data.
+	// Connection pooling is typically handled by the `database/sql` package itself,
+	// which reuses `driver.Conn` instances. The driver's role is to ensure its
+	// `Conn` implementation is efficient and thread-safe for concurrent use.
 }
 
 // Prepare returns a prepared statement, bound to this connection.
 func (c *GoSQLiteConn) Prepare(query string) (driver.Stmt, error) {
-	// SQL parsing and VDBE program compilation.
-	// For now, a simplified approach: tokenize and parse the query.
-	// In a real scenario, this would involve a query optimizer and code generator.
+	// This method is responsible for parsing the SQL query and preparing it
+	// for execution. In an enterprise-grade driver, this involves:
+	// 1. SQL Parsing: Tokenizing and parsing the SQL query into an Abstract Syntax Tree (AST).
+	// 2. Semantic Analysis: Validating the AST for correctness (e.g., table/column existence, type compatibility).
+	// 3. Query Planning: Optimizing the query and generating an efficient VDBE program (bytecode).
+	// 4. Parameter Handling: Identifying and preparing placeholders for query parameters.
 
+	// Current implementation: Tokenizes and parses the query into an AST.
 	l := NewTokenizer(query, 1024) // Max query length from Phase 2
 	p := NewParser(l, 100, 10)    // Max expression depth and tables from Phase 2
 	program := p.ParseProgram()
 
+	// Error mapping: Translate internal tokenizer/parser errors into driver-specific errors.
 	if len(l.Errors()) > 0 {
 		return nil, fmt.Errorf("tokenizer errors: %v", l.Errors())
 	}
@@ -46,8 +62,8 @@ func (c *GoSQLiteConn) Prepare(query string) (driver.Stmt, error) {
 		return nil, fmt.Errorf("parser errors: %v", p.Errors())
 	}
 
-	// For now, we'll just store the parsed program. Actual VDBE compilation
-	// from the AST would happen here in a more complete implementation.
+	// In a full implementation, the `parsedProgram` would be a fully compiled
+	// VDBE program ready for execution, not just the AST.
 	fmt.Printf("GoSQLiteConn: Prepared query: %s\n", query)
 	return &GoSQLiteStmt{conn: c, query: query, parsedProgram: program}, nil
 }
@@ -200,20 +216,30 @@ func (s *GoSQLiteStmt) Query(args []driver.Value) (driver.Rows, error) {
 
 // GoSQLiteTx implements the database/sql/driver.Tx interface.
 type GoSQLiteTx struct {
-	// This struct would hold the state of an active transaction,
-	// such as a reference to the underlying database connection and transaction ID.
+	// This struct represents an active database transaction.
+	// In an enterprise-grade implementation, it would hold the transaction's
+	// unique identifier, a reference to the `TransactionManager` to coordinate
+	// commit/rollback operations, and potentially a list of resources (e.g., locks)
+	// acquired during the transaction. It ensures that all operations within the
+	// transaction are atomic and isolated until committed or rolled back.
 }
 
 // Commit commits the transaction.
 func (tx *GoSQLiteTx) Commit() error {
-	// In a full implementation, this would send a COMMIT command to the SQLite backend.
+	// In a full enterprise-grade implementation, this would involve instructing
+	// the `TransactionManager` to finalize the transaction, ensuring all changes
+	// are durably written to disk (e.g., via WAL checkpointing or journal deletion)
+	// and all associated locks are released.
 	fmt.Println("GoSQLiteTx: Committing transaction.")
 	return nil
 }
 
 // Rollback rolls back the transaction.
 func (tx *GoSQLiteTx) Rollback() error {
-	// In a full implementation, this would send a ROLLBACK command to the SQLite backend.
+	// In a full enterprise-grade implementation, this would involve instructing
+	// the `TransactionManager` to revert all changes made during the transaction
+	// (e.g., by applying the rollback journal or discarding WAL entries) and
+	// releasing all associated locks.
 	fmt.Println("GoSQLiteTx: Rolling back transaction.")
 	return nil
 }
@@ -222,16 +248,25 @@ func (tx *GoSQLiteTx) Rollback() error {
 type GoSQLiteRows struct {
 	data       [][]driver.Value // Simulated query results
 	currentRow int              // Current row index
+	// In a full enterprise-grade implementation, this would hold a cursor or iterator
+	// over the actual VDBE result set, allowing efficient retrieval of rows
+	// without materializing the entire result set in memory upfront.
+	// It would also manage the lifecycle of the underlying VDBE execution context
+	// for this specific query.
 }
 
 // Columns returns the names of the columns.
 func (r *GoSQLiteRows) Columns() []string {
-	// In a real implementation, this would come from the VDBE's result set metadata.
+	// In a real enterprise-grade implementation, this would dynamically retrieve
+	// the actual column names and types from the VDBE's result set metadata
+	// after query execution.
 	return []string{"id", "name"} // Placeholder columns for the simulated data
 }
 
 // Close closes the rows iterator.
 func (r *GoSQLiteRows) Close() error {
+	// In a full enterprise-grade implementation, this would release any resources
+	// held by the rows iterator, such as VDBE cursors or temporary memory.
 	fmt.Println("GoSQLiteRows: Closing rows.")
 	return nil
 }

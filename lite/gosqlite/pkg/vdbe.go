@@ -82,6 +82,10 @@ func NewVdbe(program []OpCode) *Vdbe {
 func (v *Vdbe) Execute() ([][]interface{}, error) {
 	results := [][]interface{}{}
 
+	// Note: A full SIMD implementation would require Go assembly or compiler intrinsics
+	// for critical hot paths, which is beyond the scope of this high-level VDBE simulation.
+	// The current vectorized operations demonstrate the principle of operating on entire vectors.
+
 	for v.pc < len(v.program) {
 		opcode := v.program[v.pc]
 		v.pc++ // Advance program counter
@@ -93,15 +97,31 @@ func (v *Vdbe) Execute() ([][]interface{}, error) {
 			// Initialization logic (e.g., setting up execution context)
 			fmt.Println("VDBE: Initializing...")
 		case OP_Integer:
-			// In a vectorized model, this would push a vector of integers
-			// For now, a simple placeholder
-			fmt.Printf("VDBE: Pushing Integer: %d
-", opcode.P1)
+			// P1: register index, P2: integer value
+			if opcode.P1 >= len(v.registers) {
+				return nil, fmt.Errorf("register index out of bounds for OP_Integer")
+			}
+			val, err := NewVector([]int64{int64(opcode.P2)})
+			if err != nil {
+				return nil, err
+			}
+			v.registers[opcode.P1] = val
+			fmt.Printf("VDBE: Pushing Integer %d into R%d\n", opcode.P2, opcode.P1)
 		case OP_String:
-			// In a vectorized model, this would push a vector of strings
-			// For now, a simple placeholder
-			fmt.Printf("VDBE: Pushing String: %s
-", opcode.P4)
+			// P1: register index, P4: string value
+			if opcode.P1 >= len(v.registers) {
+				return nil, fmt.Errorf("register index out of bounds for OP_String")
+			}
+			strVal, ok := opcode.P4.(string)
+			if !ok {
+				return nil, fmt.Errorf("OP_String P4 operand is not a string")
+			}
+			val, err := NewVector([]string{strVal})
+			if err != nil {
+				return nil, err
+			}
+			v.registers[opcode.P1] = val
+			fmt.Printf("VDBE: Pushing String %q into R%d\n", strVal, opcode.P1)
 		case OP_Eq:
             // Expect P1 and P2 to be source register indices, P3 to be destination register index
             if opcode.P1 >= len(v.registers) || opcode.P2 >= len(v.registers) || opcode.P3 >= len(v.registers) {
@@ -676,19 +696,37 @@ func (v *Vdbe) Execute() ([][]interface{}, error) {
             v.registers[opcode.P1] = v.registers[opcode.P2]
             fmt.Printf("VDBE: Storing R%d into R%d\n", opcode.P2, opcode.P1)
         case OP_ResultRow:
-            // In a vectorized model, this would output a batch of rows.
-            // For now, a simple placeholder for a single row.
-            fmt.Println("VDBE: Outputting Result Row")
-            // Example: results = append(results, []interface{}{...})
-        case OP_Halt:
-            fmt.Println("VDBE: Halting execution.")
-            return results, nil
-        default:
-            return nil, fmt.Errorf("unknown opcode: %d", opcode.Code)
-        }
-    }
+			// In a vectorized model, this would output a batch of rows.
+			// For now, it conceptually outputs the current state of registers as a row.
+			row := make([]interface{}, len(v.registers))
+			for i, reg := range v.registers {
+				// For simplicity, taking the first element of the vector.
+				if reg.Len > 0 {
+					switch data := reg.Data.(type) {
+					case []int64:
+						row[i] = data[0]
+					case []string:
+						row[i] = data[0]
+					case []bool:
+						row[i] = data[0]
+					default:
+						row[i] = nil // Or handle unsupported types
+					}
+				} else {
+					row[i] = nil
+				}
+			}
+			results = append(results, row)
+			fmt.Println("VDBE: Outputting Result Row.")
+		case OP_Halt:
+			fmt.Println("VDBE: Halting execution.")
+			return results, nil
+		default:
+			return nil, fmt.Errorf("unknown opcode: %d", opcode.Code)
+		}
+	}
 
-    return results, nil
+	return results, nil
 }
 
 
