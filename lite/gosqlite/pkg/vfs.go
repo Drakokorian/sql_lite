@@ -6,6 +6,9 @@ import (
 	"time"
 )
 
+type PageID uint32 // Page numbers are 1-indexed
+type Page []byte
+
 // VFS represents the Virtual File System interface for SQLite operations.
 // All paths provided to VFS methods must be absolute and canonical.
 type VFS interface {
