@@ -1,9 +1,8 @@
 package pkg
 
 import (
-	"encoding/binary"
-	"fmt"
-	"io"
+    "encoding/binary"
+    "fmt"
 )
 
 // Custom error types for header validation failures.
@@ -98,4 +97,50 @@ func ReadDatabaseHeader(page Page) (*DatabaseHeader, uint32, error) {
 	copy(h.Reserved2[:], page[76:96])
 
 	return h, actualPageSize, nil
+}
+// DefaultDatabaseHeader returns a minimal, valid SQLite database header for a new
+// database.  Only the mandatory fields are populated; the rest remain zero.
+// The caller must ensure the page size is a power of two between 512-65536.
+func DefaultDatabaseHeader(pageSize uint32) *DatabaseHeader {
+	var hdr DatabaseHeader
+	copy(hdr.MagicString[:], []byte("SQLite format 3\x00"))
+	hdr.PageSize = uint16(pageSize)
+	hdr.FileFormatWriteVersion = 1
+	hdr.FileFormatReadVersion = 1
+	hdr.MaxEmbeddedPayloadFrac = 64
+	hdr.MinEmbeddedPayloadFrac = 32
+	hdr.LeafEmbeddedPayloadFrac = 32
+	return &hdr
+}
+
+// Bytes serialises the DatabaseHeader into a 100-byte slice exactly matching
+// the on-disk SQLite header layout.  It panics if the header cannot be encoded
+// into 100 bytes – which should never happen if the struct definition follows
+// the spec.
+func (h *DatabaseHeader) Bytes() []byte {
+	buf := make([]byte, 100)
+	copy(buf[0:16], h.MagicString[:])
+	binary.BigEndian.PutUint16(buf[16:18], h.PageSize)
+	buf[18] = h.FileFormatWriteVersion
+	buf[19] = h.FileFormatReadVersion
+	buf[20] = h.Reserved1
+	buf[21] = h.MaxEmbeddedPayloadFrac
+	buf[22] = h.MinEmbeddedPayloadFrac
+	buf[23] = h.LeafEmbeddedPayloadFrac
+	binary.BigEndian.PutUint32(buf[24:28], h.FileChangeCounter)
+	binary.BigEndian.PutUint32(buf[28:32], h.DatabaseSize)
+	binary.BigEndian.PutUint32(buf[32:36], h.FirstFreelistTrunkPage)
+	binary.BigEndian.PutUint32(buf[36:40], h.TotalFreelistPages)
+	binary.BigEndian.PutUint32(buf[40:44], h.SchemaCookie)
+	binary.BigEndian.PutUint32(buf[44:48], h.SchemaFormat)
+	binary.BigEndian.PutUint32(buf[48:52], h.DefaultPageCacheSize)
+	binary.BigEndian.PutUint32(buf[52:56], h.VacuumMode)
+	binary.BigEndian.PutUint32(buf[56:60], h.ApplicationID)
+	binary.BigEndian.PutUint32(buf[60:64], h.UserVersion)
+	binary.BigEndian.PutUint32(buf[64:68], h.IncrementalVacuumPage)
+	binary.BigEndian.PutUint32(buf[68:72], h.VersionValidFor)
+	binary.BigEndian.PutUint32(buf[72:76], h.SQLiteVersion)
+	copy(buf[76:96], h.Reserved2[:])
+	// The final 4 bytes (96-99) already populated above.
+	return buf
 }

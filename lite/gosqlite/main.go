@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"gosqlite/pkg"
+	gosqlite "gosqlite/pkg"
 )
 
 type PageID uint32 // Page numbers are 1-indexed
@@ -45,7 +45,3 @@ func main() {
 	// For now, we just print a small part of it.
 	fmt.Printf("First 16 bytes of page 1: %x\n", page[:16])
 
-	// Collect and print metrics
-	fmt.Println("\n--- Metrics ---")
-	metricsData := pkg.Collect()
-	

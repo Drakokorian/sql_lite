@@ -1,49 +1,82 @@
-# **Phase 2: The SQL Frontend (Hardened)**
+Phase 2 — SQL Front-End (Pure-Go, Zero-Dependency)
+Objective: add a secure, resource-bounded SQL language layer on top of the Phase 1 storage engine using only the Go standard library and OS sys-calls—no CGO, no third-party code, no reflection.
 
-**Primary Goal:** To build a secure, resilient, and fuzz-tested SQL parser.
+1 · Tokenizer — “Zero-Trust” Lexical Layer
+Deliverable	“Fully functional” definition	Self-tests (std-lib only)
+Full dialect coverage	Recognises every token required for SQLite 3 grammar: keywords, identifiers, numeric & string literals, bind parameters (?, :name, @name, $name), operators, comments.	500-query golden corpus in testdata/ compared byte-for-byte to expected token stream.
+Hard input cap	Rejects raw query > 256 KiB → ErrQueryTooLarge. Limit configurable via SetMaxQueryBytes.	Unit test feeds 300 KiB string, asserts error in <1 µs.
+Character whitelist	Control bytes < 0x20 (except TAB/LF/CR) illegal; error includes byte offset and line/column.	Table-driven test enumerates all 33 disallowed bytes.
+Streaming scan	One pass over []byte; constant-size look-ahead; heap allocations 0 for queries ≤ 4 KiB.	go test -bench Tokenize -benchmem shows 0 allocs for 4 KiB input.
+Precise error struct	type LexError struct { Code, ByteOff, Line, Col int; Msg string } — callers get exact position for IDE jump-to-error.	Unit tests assert every field for malformed inputs.
 
-### **Sprint 2.1: Zero-Trust Tokenizer & Parser**
+2 · Recursive-Descent Parser
+Capability	Hardened rules
+AST construction	Handles SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, read-only PRAGMA, EXPLAIN, CTEs, window functions. Each node holds source-range (start, end byte).
+Semantic checks	Function arity; aggregate vs GROUP BY; unique column aliases; optional “deterministic-functions-only” mode.
+Resource caps	Configurable: ≤ 16 joins, ≤ 8 CTEs, expression depth ≤ 25, token count ≤ 1000, AST nodes ≤ 20 000. Exceed → ErrLimitExceeded.
+Context cancellation	Parse(ctx, bytes) aborts quickly (<1 ms) on ctx.Done().
+Deterministic fingerprint	Identical input bytes → identical JSON serialisation → SHA-256 fingerprint (implemented with crypto/sha256) for plan cache.
 
-**Objective:** To develop a robust and secure SQL tokenizer and parser that treats all input as potentially malicious, enforcing strict resource limits and validation rules.
+3 · Error Model
+Stable codes: E_LEX, E_SYNTAX, E_SEMANTIC, E_LIMIT, E_TOO_LARGE.
 
-#### **Component: Tokenizer (`tokenizer.go`)**
+Errors implement interface{ Error() string; Code() int; Offset() int }.
 
-1.  **Lexical Analysis:** The tokenizer will perform lexical analysis, breaking down the raw SQL query string into a stream of tokens (e.g., keywords, identifiers, operators, literals).
-2.  **Input Validation:**
-    *   **Query Length Limits:** Enforce a maximum permissible length for incoming SQL queries to prevent buffer overflows and excessive memory allocation.
-    *   **Character Set Validation:** Only allow a predefined set of valid characters to prevent injection of control characters or other malicious data.
-3.  **Error Handling:** Provide precise error reporting for lexical errors, indicating the exact position and nature of the invalid token.
+Minimal recovery: after fatal token, parser skips to next semicolon so batch files surface multiple errors at once.
 
-#### **Component: Parser (`parser.go`)**
+4 · Coverage-Guided Fuzzing (Go 1.22 built-in)
+Element	Details (no external tools)
+Harness	parser_fuzz_test.go: func FuzzParse(f *testing.F) converts []byte→string, runs Tokenize→Parse with 256 KiB cap; ignores context.Canceled.
+Corpus	Seeds: ANSI tests, SQLite edge-case queries, pathologically deep parentheses, long identifiers. Stored under testdata/corpus/.
+CI budget	30 s per PR (go test -fuzztime=30s ./...), nightly 15 min with -fuzztime=15m.
+Crash artifacts	On panic, failing input is written to testdata/crash_*.sql via os.WriteFile.
+Memory leak guard	Harness snapshots runtime.MemStats every 10 000 iterations; > 5 % growth fails fuzz job.
 
-1.  **Syntactic Analysis (AST Construction):** The parser will take the token stream from the tokenizer and construct an Abstract Syntax Tree (AST) representing the hierarchical structure of the SQL query.
-2.  **Semantic Analysis:** Perform checks to ensure the query is semantically valid (e.g., correct number of arguments for functions, type compatibility).
-3.  **Resource Limit Enforcement:**
-    *   **Expression Depth Limits:** Restrict the maximum nesting depth of expressions (e.g., nested subqueries, complex `WHERE` clauses) to prevent stack overflows and excessive computation during query planning.
-    *   **Number of Joins/Tables:** Limit the number of tables involved in a single query to prevent combinatorial explosion in query planning.
-    *   **Memory Allocation Limits:** Implement mechanisms to monitor and limit memory consumption during AST construction and semantic analysis.
-4.  **Zero-Trust Principles:**
-    *   **Input Sanitization:** While the tokenizer handles initial character validation, the parser will continue to validate and sanitize all parsed elements, ensuring no malicious constructs can bypass the initial checks.
-    *   **Strict Type Checking:** Enforce strict type compatibility rules to prevent unexpected behavior or vulnerabilities arising from type mismatches.
-5.  **Error Handling:** Generate detailed and actionable error messages for syntax and semantic errors, aiding in debugging and preventing malformed queries from proceeding further.
+5 · Observability (std-lib only)
+Logs via log.Logger (already initialised in Phase 1): add fields phase=tokenize|parse, query_len, ast_nodes, duration_ms.
 
-### **Sprint 2.2: Fuzz Testing Framework**
+Metrics via expvar:
 
-**Objective:** To establish a continuous and comprehensive fuzz testing framework to proactively identify and mitigate vulnerabilities in the SQL parser and related components.
+counters sql_parse_total, sql_parse_errors_total
 
-#### **Component: Fuzz Tester (`fuzz_test.go`)**
+histogram buckets sql_parse_latency_ms_{1,4,16,64,256} (manual slice counters)
 
-1.  **Fuzzing Harness Development:** Create a dedicated fuzzing harness that exposes the parser's input interfaces to the fuzzer. This harness will be responsible for:
-    *   **Input Generation:** Generating a wide variety of syntactically valid, invalid, and malformed SQL queries. This includes random character sequences, edge cases, and mutations of known valid SQL.
-    *   **Execution:** Feeding the generated inputs to the SQL parser and executing the parsing logic.
-    *   **Monitoring for Anomalies:** Continuously monitoring the parser's behavior for:
-        *   **Crashes/Panics:** Detecting unexpected program terminations.
-        *   **Memory Leaks:** Identifying gradual increases in memory consumption that could indicate resource mismanagement.
-        *   **Infinite Loops/Resource Exhaustion:** Detecting cases where the parser enters an endless loop or consumes excessive CPU/memory without terminating.
-        *   **Incorrect Output:** Verifying that the parser's output (e.g., AST structure, error messages) is consistent with expectations, even for malformed inputs.
-2.  **Coverage-Guided Fuzzing:** Implement coverage-guided fuzzing techniques to ensure that the fuzzer explores as many different code paths within the parser as possible. This involves:
-    *   **Instrumentation:** Instrumenting the parser code to collect feedback on code coverage during fuzzing runs.
-    *   **Feedback Loop:** Using coverage information to guide the fuzzer towards unexplored code paths, increasing the effectiveness of vulnerability discovery.
-3.  **Corpus Management:** Maintain a corpus of interesting inputs that have triggered unique code paths or revealed bugs. This corpus will be used to seed future fuzzing runs and ensure regression testing.
-4.  **Integration with CI/CD:** Integrate the fuzz testing suite into the continuous integration/continuous deployment (CI/CD) pipeline to ensure that fuzzing runs automatically with every code change, providing continuous security assurance.
-5.  **Reporting and Triage:** Establish a clear process for reporting and triaging issues discovered by the fuzzer, including detailed logs and reproducible test cases.
+Slow-parse log: if parse > configured threshold (default 10 ms) emit "slow_sql_parse" entry with first 1 KiB of UTF-8-escaped query.
+
+6 · Quality Gates
+Gate	Threshold & tool (std-lib)
+Unit coverage	Tokeniser + parser ≥ 85 % (go test -cover)
+Race detector	go test -race ./... green on linux-amd64, darwin-arm64, windows-amd64
+Vet	go vet ./... zero diagnostics
+Fuzz	30 s run on PR; no panic, leak or race
+Bench guard	go test -bench ParseLong -benchtime=10x -benchmem must not regress > 15 % time or allocs vs main
+
+All gates execute with the plain Go tool-chain—no third-party linters or analyzers.
+
+7 · Documentation Updates
+PARSER.md – grammar table, AST node glossary, limit knobs, fingerprint rationale.
+
+FUZZING.md – how to run/debug fuzz locally, corpus layout, crash triage SOP.
+
+SECURITY.md – new section on SQL input threat vectors and enforced limits.
+
+CHANGELOG.md – add v0.2.0 entry for SQL front-end GA.
+
+✅ Phase 2 Exit Checklist
+Parses ≥ 99 % of public SQLite regression queries (imported as plain text in repo) without error; malformed inputs return correct codes & offsets.
+
+Worst-case adversarial input consumes ≤ 64 MiB RAM, aborts ≤ 250 ms with E_LIMIT.
+
+24-hour continuous fuzz (nightly) finishes without crash, leak, or race.
+
+Logs and expvar metrics appear correctly for 10 000 parses.
+
+All quality gates green; tag release v0.2.0.
+
+
+
+
+
+
+
+

@@ -1,161 +1,182 @@
 package pkg
 
 import (
-	"fmt"
-	"io"
-	"sync"
-
-	"gosqlite/pkg/metrics"
+    "fmt"
+    "io"
+    "sort"
+    "sync"
 )
 
-// Pager manages reading/writing pages from the database file and caching them.
+// Pager is responsible for translating page-IDs (1-indexed) to byte offsets in
+// the database file, managing the Adaptive-Replacement-Cache (ARC) and tracking
+// dirty pages that must be flushed on commit or Close().  It intentionally does
+// NOT understand higher-level database structures – its sole responsibility is
+// durable, cache-bounded page access.
+
 type Pager struct {
-	vfs        VFS
-	file       File
-	pageSize   uint16
-	dbSize     uint32 // Current size of the database in pages
-	cache      *ARCCache // ARC cache for pages
-	dirtyPages map[pkg.PageID]struct{} // Set of page IDs that are dirty
-	mu         sync.Mutex // Mutex to protect concurrent access to pager state
-	cacheHits  *metrics.Metric
-	cacheMisses *metrics.Metric
-	// ... other fields for journal/WAL management (in later phases)
+    vfs  VFS
+    file File
+
+    pageSize uint16  // immutable for the lifetime of the Pager instance
+    dbSize   uint32  // current database size in pages (lazy-updated)
+
+    cache      *ARCCache          // hot-page cache (ARC)
+    dirtyPages map[PageID]struct{} // set of pages modified since last flush
+
+    mu sync.Mutex // protects every field above
 }
 
-// NewPager initializes a new Pager.
-func NewPager(vfs VFS, file File, pageSize uint16, cacheSize int) (*Pager, error) {
-	cacheHits, err := metrics.RegisterCounter("pager_cache_hits")
-	if err != nil {
-		return nil, fmt.Errorf("failed to register pager_cache_hits metric: %w", err)
-	}
-	cacheMisses, err := metrics.RegisterCounter("pager_cache_misses")
-	if err != nil {
-		return nil, fmt.Errorf("failed to register pager_cache_misses metric: %w", err)
-	}
+// NewPager constructs a fully initialised Pager.  The supplied pageSize must
+// already have been validated against the SQLite header rules (power-of-two,
+// 512-65536).
+func NewPager(vfs VFS, file File, pageSize uint16, cachePages int) (*Pager, error) {
+    if vfs == nil || file == nil {
+        return nil, fmt.Errorf("pager: vfs and file must be non-nil")
+    }
+    if pageSize < 512 || pageSize > 65536 || (pageSize&(pageSize-1)) != 0 {
+        return nil, fmt.Errorf("pager: invalid page size %d", pageSize)
+    }
+    if cachePages <= 0 {
+        cachePages = 256 // sensible default – 256 pages → 1 MiB at 4 KiB pages
+    }
 
-	p := &Pager{
-		vfs:        vfs,
-		file:       file,
-		pageSize:   pageSize,
-		cache:      NewARCCache(cacheSize), // Initialize ARC cache
-		dirtyPages: make(map[pkg.PageID]struct{}),
-		cacheHits:  cacheHits,
-		cacheMisses: cacheMisses,
-	}
+    sizeBytes, err := file.Size()
+    if err != nil {
+        return nil, fmt.Errorf("pager: stat failed: %w", err)
+    }
 
-	// Determine initial dbSize from file size
-	fileSize, err := file.Size()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get file size: %w", err)
-	}
-	p.dbSize = uint32(fileSize / int64(pageSize))
+    p := &Pager{
+        vfs:        vfs,
+        file:       file,
+        pageSize:   pageSize,
+        dbSize:     uint32(sizeBytes / int64(pageSize)),
+        cache:      NewARCCache(cachePages),
+        dirtyPages: make(map[PageID]struct{}),
+    }
 
-	return p, nil
+    return p, nil
 }
 
-// GetPage retrieves a page from the pager. It first checks the cache, then reads from disk.
-func (p *Pager) GetPage(id pkg.PageID) (pkg.Page, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	if id == 0 { // Page IDs are 1-indexed
-		return nil, fmt.Errorf("page ID cannot be 0")
-	}
-
-	// Check cache first
-	if page, ok := p.cache.Get(id); ok {
-		p.cacheHits.Inc()
-		return page, nil
-	}
-
-	p.cacheMisses.Inc()
-	// If not in cache, read from disk
-	offset := int64(id-1) * int64(p.pageSize)
-	// Zero-Allocation Read: For extreme performance, a pre-allocated buffer pool
-	// could be used here to minimize allocations during reads in hot paths.
-	page := make(pkg.Page, p.pageSize)
-	n, err := p.file.ReadAt(page, offset)
-	if err != nil && err != io.EOF {
-		return nil, fmt.Errorf("failed to read page %d from disk: %w", id, err)
-	}
-	if n != int(p.pageSize) && err != io.EOF {
-		return nil, fmt.Errorf("short read for page %d: expected %d bytes, got %d", id, p.pageSize, n)
-	}
-
-	// Add to cache
-	p.cache.Put(id, page)
-
-	return page, nil
+// PageCount returns the current size of the database measured in pages.
+func (p *Pager) PageCount() uint32 {
+    p.mu.Lock()
+    defer p.mu.Unlock()
+    return p.dbSize
 }
 
-// WritePage writes a page to the pager. It updates the cache and marks the page as dirty.
-// Actual disk writes are deferred to transaction commit.
-func (p *Pager) WritePage(id pkg.PageID, data pkg.Page) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+// GetPage retrieves a page, first consulting the ARC cache, otherwise reading
+// from disk.  The returned slice is ALWAYS exactly len==pageSize bytes.
+func (p *Pager) GetPage(id PageID) (Page, error) {
+    if id == 0 {
+        return nil, fmt.Errorf("pager: pageID 0 is invalid – pages are 1-indexed")
+    }
 
-	if id == 0 { // Page IDs are 1-indexed
-		return fmt.Errorf("page ID cannot be 0")
-	}
-	if uint16(len(data)) != p.pageSize {
-		return fmt.Errorf("page data size mismatch: expected %d bytes, got %d", p.pageSize, len(data))
-	}
+    p.mu.Lock()
+    // fast-path: in-cache → return immediately
+    if pg, ok := p.cache.Get(id); ok {
+        p.mu.Unlock()
+        return pg, nil
+    }
+    // not cached – we must read from disk; hold reference to file, but release
+    // cache lock so ReadAt can run without blocking other readers.
+    p.mu.Unlock()
 
-	// Update cache
-	p.cache.Put(id, data)
+    // allocate outside lock – avoid blocking; we cannot safely reuse the slice
+    // because other goroutines may keep references.
+    buf := make(Page, p.pageSize)
+    offset := int64(id-1) * int64(p.pageSize)
+    n, err := p.file.ReadAt(buf, offset)
+    if err != nil && err != io.EOF {
+        return nil, fmt.Errorf("pager: read page %d failed: %w", id, err)
+    }
+    if n != int(p.pageSize) {
+        // short read → treat as zero-page per SQLite semantics when extending
+        for i := n; i < int(p.pageSize); i++ {
+            buf[i] = 0
+        }
+    }
 
-	// Mark as dirty
-	p.dirtyPages[id] = struct{}{}
+    // store into cache under lock
+    p.mu.Lock()
+    p.cache.Put(id, buf)
+    p.mu.Unlock()
 
-	// Update dbSize if this is a new page beyond current size
-		if uint32(id) > p.dbSize {
-		p.dbSize = uint32(id)
-	}
-
-	return nil
+    return buf, nil
 }
 
-// FlushDirtyPages writes all dirty pages to disk.
-func (p *Pager) flushDirtyPagesLocked() error {
-	for id := range p.dirtyPages {
-		page, ok := p.cache.Get(id)
-		if !ok {
-			return fmt.Errorf("dirty page %d not found in cache during flush", id)
-		}
-		offset := int64(id-1) * int64(p.pageSize)
-		_, err := p.file.WriteAt(page, offset)
-		if err != nil {
-			return fmt.Errorf("failed to write dirty page %d to disk: %w", id, err)
-		}
-	}
+// WritePage copies the supplied data into the cache and marks the page dirty.
+// The caller must supply exactly pageSize bytes.
+func (p *Pager) WritePage(id PageID, data Page) error {
+    if id == 0 {
+        return fmt.Errorf("pager: pageID 0 is invalid – pages are 1-indexed")
+    }
+    if uint16(len(data)) != p.pageSize {
+        return fmt.Errorf("pager: data length %d does not match page size %d", len(data), p.pageSize)
+    }
 
-	// Sync the file to ensure data is written to persistent storage
-	if err := p.file.Sync(); err != nil {
-		return fmt.Errorf("failed to sync file after flushing dirty pages: %w", err)
-	}
+    // Make a copy of the slice – the caller may mutate it after return.
+    pageCopy := make(Page, p.pageSize)
+    copy(pageCopy, data)
 
-	// Clear dirty pages after successful flush
-	p.dirtyPages = make(map[pkg.PageID]struct{})
-
-	return nil
+    p.mu.Lock()
+    p.cache.Put(id, pageCopy)
+    p.dirtyPages[id] = struct{}{}
+    if uint32(id) > p.dbSize {
+        p.dbSize = uint32(id)
+    }
+    p.mu.Unlock()
+    return nil
 }
 
-// FlushDirtyPages writes all dirty pages to disk.
+// FlushDirtyPages persists every dirty page in LRU-order to disk and fsyncs the
+// underlying handle.  Callers should hold no locks or slices referencing cached
+// pages while invoking FlushDirtyPages().
 func (p *Pager) FlushDirtyPages() error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.flushDirtyPagesLocked()
+    p.mu.Lock()
+    // build slice of dirty IDs to write in deterministic order (ascending)
+    ids := make([]PageID, 0, len(p.dirtyPages))
+    for id := range p.dirtyPages {
+        ids = append(ids, id)
+    }
+    p.mu.Unlock()
+
+    // sort ascending for stable ordering – avoids excessive fragmentation
+    // across WAL/journal; p.dirtyPages can be large so use sort.Slice.
+    sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+
+    for _, id := range ids {
+        p.mu.Lock()
+        pg, ok := p.cache.Get(id)
+        p.mu.Unlock()
+        if !ok {
+            return fmt.Errorf("pager: dirty page %d vanished from cache", id)
+        }
+
+        offset := int64(id-1) * int64(p.pageSize)
+        n, err := p.file.WriteAt(pg, offset)
+        if err != nil {
+            return fmt.Errorf("pager: write page %d failed: %w", id, err)
+        }
+        if n != int(p.pageSize) {
+            return fmt.Errorf("pager: short write on page %d (wrote %d bytes)", id, n)
+        }
+    }
+
+    if err := p.file.Sync(); err != nil {
+        return fmt.Errorf("pager: fsync failed: %w", err)
+    }
+
+    // success – clear dirty map
+    p.mu.Lock()
+    p.dirtyPages = make(map[PageID]struct{})
+    p.mu.Unlock()
+    return nil
 }
 
-// Close closes the underlying file.
+// Close flushes dirty pages and closes the underlying file.
 func (p *Pager) Close() error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	// Flush any remaining dirty pages before closing
-	if err := p.flushDirtyPagesLocked(); err != nil {
-		return fmt.Errorf("failed to flush dirty pages before closing pager: %w", err)
-	}
-
-	return p.file.Close()
+    if err := p.FlushDirtyPages(); err != nil {
+        return err
+    }
+    return p.file.Close()
 }

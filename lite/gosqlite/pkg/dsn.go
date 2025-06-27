@@ -12,6 +12,7 @@ import (
 // DSNConfig holds parsed configuration parameters from the DSN string.
 type DSNConfig struct {
 	Path        string
+	VFS         string        // Optional VFS name (e.g., "sandbox", "os")
 	Mode        string        // e.g., "rwc" (read/write/create), "ro" (read-only)
 	Cache       string        // e.g., "shared", "private"
 	JournalMode string        // e.g., "WAL", "DELETE", "TRUNCATE"

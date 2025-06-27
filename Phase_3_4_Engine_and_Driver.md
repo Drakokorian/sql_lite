@@ -1,55 +1,75 @@
-# **Phases 3 & 4: VDBE & Driver (Hardened)**
+Phase 3 — Vectorised Execution Engine (VDBE) — Pure-Go, Zero-Dependency
+Goal: replace the classic row-oriented interpreter with a batch-oriented, SIMD-optional engine that runs entirely in Go.
+No CGO, no C, no external modules — only the Go 1.x standard library and, optionally, hand-written Go/assembly kept inside the repo.
 
-**Primary Goal:** To build a hyper-performance, vectorized, and secure execution engine.
+1 · Columnar Storage & Batch Loop
+Deliverable	“Fully functional” definition	Validation (std-lib only)
+Column-major buffers	Every table or temp result is held as one typed slice per column ([]int64, []float64, []byte…), never as per-row structs.	Unit test checks pointer difference between successive values equals element size.
+Batch size control	Default batch = 1 024 rows; CLI/env var sets 256 – 16 384.	Benchmark shows linear runtime vs batch size with no extra allocs.
+Execution driver	Outer loop slices columns into batches; dispatches vector opcodes until rows exhausted.	go test -bench VectorLoop shows ≥4 × speed-up vs reference row loop in same repo.
 
-### **Sprint 3.1: Vectorized (SIMD) VDBE**
+2 · Vector-Aware Opcodes
+Category	Vector behaviour
+Comparison (EQ, LT, GT, etc.)	Accept two value slices, produce []bool mask; support NULL semantics via parallel []byte validity bitmap.
+Arithmetic	Operate element-wise on numeric slices; overflow saturates to SQLite rules.
+Filter	Apply []bool mask to all column slices in constant time (copy-forward algorithm).
+Hash & merge joins	Hash join: build side hashed into open-address table; probe side processed in batches.
+Merge join: two sorted streams advanced with binary-search helper.
+Aggregate	Reduction across slice—SUM, COUNT, AVG, MIN, MAX; grouping uses simple in-memory hash table keyed by group cols.
+Constant-time comparisons	Equality routines for sensitive data (e.g., passwords) implemented with length-invariant loops (pure Go); build tag timing_test verifies <2 % delta between equal and diff inputs.
 
-**Objective:** To implement a Virtual Database Engine (VDBE) that processes data in a vectorized manner, leveraging CPU-level parallelism for extreme performance.
+3 · SIMD Optional Hot Paths (Still Zero-Dependency)
+Implementation: Hand-written .s files (*_avx2.s, *_neon.s) inside repo; build tag nosimd disables.
 
-#### **Component: VDBE Core (`vdbe.go`)**
+Dispatch: Tiny init checks cpu.X86.HasAVX2 or cpu.ARM64.HasASIMD (std-lib internal/cpu exported via runtime/cpu in Go 1.22) and swaps function pointers.
 
-1.  **Vectorized Execution Model:** The VDBE will fundamentally shift from a row-at-a-time processing model to a vectorized model. This means that instead of fetching and operating on individual rows, the VDBE will operate on batches (vectors) of data.
-    *   **Columnar Data Representation:** Internally, data within the VDBE's execution context (e.g., temporary tables, intermediate results) will be stored in a columnar format. This layout is highly efficient for vectorized operations, as it allows for contiguous memory access for a single column across multiple rows.
-    *   **Batch Processing:** Each VDBE opcode will be designed to accept and produce vectors of values. For example, an `OP_EQ` (equality comparison) opcode would take two input vectors and produce a boolean result vector, indicating equality for each pair of elements in the batch.
-    *   **CPU-Level Parallelism (SIMD):** The implementation will strategically utilize CPU Single Instruction, Multiple Data (SIMD) instructions where applicable. This will involve:
-        *   **Go Assembly/Intrinsics:** For critical hot paths (e.g., string comparisons, numeric operations, hashing), direct Go assembly or compiler intrinsics (if available and stable) will be employed to emit SIMD instructions. This ensures that the CPU performs the same operation on multiple data elements concurrently, maximizing throughput.
-        *   **Optimized Data Structures:** Data structures will be aligned to cache lines and designed to minimize cache misses, further enhancing SIMD effectiveness.
-2.  **VDBE Opcodes Redesign:** All existing and new VDBE opcodes will be re-engineered to operate on vectors. This includes:
-    *   **Filtering Operations:** `WHERE` clauses will be evaluated by applying vectorized comparison opcodes (e.g., `OP_GT`, `OP_LT`, `OP_EQ`) to entire columns, producing boolean masks.
-    *   **Aggregation Functions:** `SUM`, `COUNT`, `AVG` will operate on vectors of numbers, accumulating results efficiently.
-    *   **Join Operations:** Hash joins and merge joins will be optimized for vectorized input, leveraging vectorized hashing and comparison.
+Purity: No unsafe package beyond necessary slice→pointer conversions; still part of std-lib.
 
-### **Sprint 3.2: Constant-Time & Zero-Allocation Execution**
+4 · Memory & Security Guards
+Guard	Policy
+Memory cap	Estimate = batchRows × rowSize × columnCount. If > configured cap (default 64 MiB) → ErrExecMemory.
+Zero-alloc hot path	Scratch buffers in sync.Pool; after warm-up allocs/query ≤5. Verified with go test -bench -benchmem.
+Bounds checking	All slice accesses guarded by if idx >= len(slice) { panic("bounds") } in debug builds; strip with -tags prod if desired.
+Context polls	Each batch loop starts with select { case <-ctx.Done(): return ctx.Err() default: } for cooperative cancel.
 
-**Objective:** To ensure that all VDBE operations are designed for maximum security against side-channel attacks and minimal memory footprint.
+5 · Observability (std-lib only)
+Counters via expvar: vectors_total, simd_calls_total, exec_mem_bytes, join_hash_probe_collisions.
 
-#### **Component: Hardened VDBE Opcodes (`vdbe_opcodes_hardened.go`)**
+Slow-query log: if execution > threshold (default 50 ms) write structured line with query_id, exec_ms, batch_rows, simd=on|off.
 
-1.  **Zero-Allocation Design:**
-    *   **Pre-allocated Buffers:** Minimize dynamic memory allocations during query execution by using pre-allocated buffer pools for intermediate results, string manipulations, and other temporary data.
-    *   **Stack-based Allocations:** Favor stack-based allocations for small, short-lived data structures where possible, reducing garbage collector pressure.
-    *   **In-place Operations:** Prioritize in-place modifications of data structures to avoid creating new copies.
-2.  **Constant-Time Algorithms:**
-    *   **Side-Channel Attack Prevention:** Any VDBE opcode that performs comparisons or operations on potentially sensitive user data (e.g., password hashes, encryption keys, authentication tokens) will strictly use constant-time algorithms. This prevents timing side-channel attacks, where an attacker could infer information about secret values by measuring the execution time of operations.
-    *   **Implementation:** This involves careful implementation of comparison routines to ensure that their execution time is independent of the input data's values. This may require custom Go implementations or leveraging cryptographic libraries that provide constant-time primitives.
-3.  **Input Validation and Bounds Checking:**
-    *   **Strict Validation:** Every opcode will perform rigorous validation of its input operands, ensuring they are within expected ranges and types.
-    *   **Bounds Checking:** Explicit bounds checking will be performed for all array and slice accesses to prevent out-of-bounds reads or writes, which could lead to crashes or security vulnerabilities.
+pprof remains enabled from Phase 1; vector engine exposes custom profile labels (runtime/pprof.SetGoroutineLabels) for query_id.
 
-### **Sprint 4.1: Go `database/sql` Integration**
+6 · Tests & Quality Gates
+Gate	Threshold / method (all std-lib)
+Unit coverage	vdbe/ packages ≥ 85 % (go test -cover).
+Race detector	go test -race ./vdbe/... green (default & nosimd).
+go vet	Zero diagnostics.
+Benchmark guard	VectorScan over 10 M rows ≥4× faster than row loop; nosimd build ≥2×.
+Fuzz	30 s per PR on opcode argument generator; no panic, leak, or race.
+Memory limit	Stress test loads 70 MiB estimate → engine returns ErrExecMemory; 60 MiB passes without OOM.
 
-**Objective:** To provide a standard and idiomatic Go interface for interacting with the `gosqlite` driver, adhering to the `database/sql` package specifications.
+7 · Documentation
+VDBE.md — architecture diagram, opcode table, batch loop, SIMD build tags, memory formula.
 
-#### **Component: Driver Interface (`driver.go`)**
+PERF_GUIDE.md — tuning batch size, memory cap, nosimd flag, slow-query threshold.
 
-1.  **`database/sql/driver` Implementation:** The `gosqlite` driver will implement the interfaces defined in Go's `database/sql/driver` package. This includes:
-    *   **`Driver` Interface:** For opening new database connections.
-    *   **`Conn` Interface:** For managing database sessions, preparing statements, and beginning transactions.
-    *   **`Stmt` Interface:** For executing prepared statements and handling parameters.
-    *   **`Result` Interface:** For retrieving results from `INSERT`, `UPDATE`, `DELETE` operations.
-    *   **`Rows` Interface:** For iterating over query results.
-2.  **Error Mapping:** The driver will correctly map the detailed internal SQLite error codes and messages to standard Go error types and `database/sql` specific errors. This ensures consistent and predictable error handling for applications using the driver.
-3.  **Parameter Handling:** Implement robust handling of query parameters, ensuring proper type conversion and prevention of SQL injection vulnerabilities.
-4.  **Connection Pooling:** While `database/sql` handles connection pooling at a higher level, the `gosqlite` driver will ensure its `Conn` implementations are lightweight and efficient to support effective pooling.
-5.  **Concurrency Model:** Ensure that the driver's implementation of the `database/sql` interfaces is thread-safe and handles concurrent access to connections and statements correctly, aligning with Go's concurrency model.
-6.  **Context Propagation:** Support `context.Context` for cancellation and timeouts in database operations, allowing applications to manage long-running queries and resource usage effectively.
+CHANGELOG.md — add v0.3.0 entry for vector engine GA.
+
+✅ Phase 3 Exit Checklist
+TPC-H Query 1 at 10 GB runs in <40 s (pure Go) and <20 s (simd build) on reference laptop.
+
+Worst-case adversarial query capped by memory guard; returns ErrExecMemory, never crashes.
+
+10-minute 100-goroutine hammer passes race detector; steady RSS < configured cap.
+
+Logs & metrics show vector counts and SIMD flag; slow-query log fires appropriately.
+
+All gates green; tag release v0.3.0.
+
+
+
+
+
+
+
+

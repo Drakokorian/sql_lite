@@ -3,9 +3,8 @@
 package pkg
 
 import (
-	"fmt"
-	"syscall"
-	"unsafe"
+    "fmt"
+    "syscall"
 )
 
 // lock implements platform-specific file locking for Windows.
